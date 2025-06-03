@@ -4,10 +4,12 @@ Description: Automates IAM User and Group creation with logging.
 Parameters:
   S3UserEmail:
     Type: String
-    Description: Email for s3-user
+    Description: Email for s3-user (optional)
+    Default: ''
   EC2UserEmail:
     Type: String
-    Description: Email for ec2-user
+    Description: Email for ec2-user (optional)
+    Default: ''
 
 Resources:
 
@@ -132,8 +134,13 @@ Resources:
                   else:
                       continue
 
-                  email = ssm.get_parameter(Name=email_param)['Parameter']['Value']
-                  print(f"User: {username}, Email: {email}, Temporary Password: {password}")
+                  try:
+                      email = ssm.get_parameter(Name=email_param)['Parameter']['Value']
+                      email_info = f"Email: {email}" if email else "No email provided"
+                  except Exception as e:
+                      email_info = "No email provided"
+                  
+                  print(f"User: {username}, {email_info}, Temporary Password: {password}")
 
   # 8. EventBridge Rule
   UserCreationRule:
