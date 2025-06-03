@@ -1,0 +1,5 @@
+template-file-path: felix.yaml
+parameters:
+  S3UserEmail: ''
+  EC2UserEmail: ''
+tags: {}
