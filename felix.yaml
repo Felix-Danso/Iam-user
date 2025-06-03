@@ -11,6 +11,10 @@ Parameters:
     Description: Email for ec2-user (optional)
     Default: ''
 
+Conditions:
+  HasS3Email: !Not [!Equals [!Ref S3UserEmail, '']]
+  HasEC2Email: !Not [!Equals [!Ref EC2UserEmail, '']]
+
 Resources:
 
   # 1. Generate One-Time Password
@@ -70,6 +74,7 @@ Resources:
   # 5. Parameter Store entries for emails
   S3UserEmailParam:
     Type: AWS::SSM::Parameter
+    Condition: HasS3Email
     Properties:
       Name: /user/s3/email
       Type: String
@@ -77,6 +82,7 @@ Resources:
 
   EC2UserEmailParam:
     Type: AWS::SSM::Parameter
+    Condition: HasEC2Email
     Properties:
       Name: /user/ec2/email
       Type: String
@@ -118,6 +124,7 @@ Resources:
       Code:
         ZipFile: |
           import boto3, json, os
+          from botocore.exceptions import ClientError
 
           def handler(event, context):
               ssm = boto3.client('ssm')
@@ -134,10 +141,26 @@ Resources:
                   else:
                       continue
 
+                  # Check if parameter exists before trying to retrieve it
                   try:
-                      email = ssm.get_parameter(Name=email_param)['Parameter']['Value']
-                      email_info = f"Email: {email}" if email else "No email provided"
-                  except Exception as e:
+                      # Use describe_parameters to check if parameter exists
+                      response = ssm.describe_parameters(
+                          ParameterFilters=[
+                              {
+                                  'Key': 'Name',
+                                  'Option': 'Equals',
+                                  'Values': [email_param]
+                              }
+                          ]
+                      )
+                      
+                      if response['Parameters']:
+                          # Parameter exists, get its value
+                          email = ssm.get_parameter(Name=email_param)['Parameter']['Value']
+                          email_info = f"Email: {email}" if email else "No email provided"
+                      else:
+                          email_info = "No email provided"
+                  except ClientError as e:
                       email_info = "No email provided"
                   
                   print(f"User: {username}, {email_info}, Temporary Password: {password}")
