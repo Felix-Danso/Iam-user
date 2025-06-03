@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Automates IAM User and Group creation with logging.
+
+Parameters:
+  S3UserEmail:
+    Type: String
+    Description: Email for s3-user
+  EC2UserEmail:
+    Type: String
+    Description: Email for ec2-user
+
+Resources:
+
+  # 1. Generate One-Time Password
+  TempPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: tempPassword
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: "password"
+        PasswordLength: 12
+        ExcludeCharacters: "\"@/\\"
+
+  # 2. S3 Read-only Group
+  S3Group:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: S3Group
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  # 3. EC2 Read-only Group
+  EC2Group:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: EC2Group
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+
+  # 4. IAM Users
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: s3-user
+      Groups:
+        - !Ref S3Group
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${TempPasswordSecret}::password}}"
+        PasswordResetRequired: true
+      Tags:
+        - Key: Purpose
+          Value: S3 Access
+
+  EC2User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user
+      Groups:
+        - !Ref EC2Group
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${TempPasswordSecret}::password}}"
+        PasswordResetRequired: true
+      Tags:
+        - Key: Purpose
+          Value: EC2 Access
+
+  # 5. Parameter Store entries for emails
+  S3UserEmailParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /user/s3/email
+      Type: String
+      Value: !Ref S3UserEmail
+
+  EC2UserEmailParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /user/ec2/email
+      Type: String
+      Value: !Ref EC2UserEmail
+
+  # 6. Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ssm:GetParameter
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+
+  # 7. Lambda Function
+  NotifyUserLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LogUserCredentials
+      Runtime: python3.11
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          import boto3, json, os
+
+          def handler(event, context):
+              ssm = boto3.client('ssm')
+              sm = boto3.client('secretsmanager')
+              secret = sm.get_secret_value(SecretId='tempPassword')['SecretString']
+              password = json.loads(secret)['password']
+
+              for record in event['detail']['responseElements']['user']:
+                  username = record['userName']
+                  if username == 's3-user':
+                      email_param = '/user/s3/email'
+                  elif username == 'ec2-user':
+                      email_param = '/user/ec2/email'
+                  else:
+                      continue
+
+                  email = ssm.get_parameter(Name=email_param)['Parameter']['Value']
+                  print(f"User: {username}, Email: {email}, Temporary Password: {password}")
+
+  # 8. EventBridge Rule
+  UserCreationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - "aws.iam"
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventName:
+            - "CreateUser"
+      Targets:
+        - Arn: !GetAtt NotifyUserLambda.Arn
+          Id: "LogUserCredentials"
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotifyUserLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UserCreationRule.Arn
